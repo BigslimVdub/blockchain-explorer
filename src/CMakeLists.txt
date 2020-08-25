@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5.0)
+cmake_minimum_required(VERSION 3.12.0)
 
 project(myxrm)
 
@@ -20,7 +20,8 @@ set(SOURCE_FILES
   MempoolStatus.cpp
   MempoolStatus.h)
 
-# make static library called libmyxrm
-# that we are going to link to
-# in the root CMakeLists.txt file
+add_subdirectory(randomarq_code)
+
 add_library(myxrm STATIC ${SOURCE_FILES})
+
+target_link_libraries(myxrm randomarq_crypto)

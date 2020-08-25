@@ -31,13 +31,11 @@
 
 #include "../ext/mstch/src/visitor/render_node.hpp"
 
-extern "C" uint64_t rx_seedheight(const uint64_t height);
-extern "C" bool rx_needhash(const uint64_t height, uint64_t *seedheight);
-extern "C" void rx_seedhash(const uint64_t height, const char *hash, const int miners);
-extern "C" void rx_slow_hash(const void *data, size_t length, char *hash, int miners);
-extern "C" void rx_reorg(const uint64_t split_height);
+extern "C" uint64_t arq_rx_seedheight(const uint64_t height);
+extern "C" void arq_rx_slow_hash(const uint64_t mainheight, const uint64_t seedheight, const char *seedhash, const void *data, size_t length, char *hash, int miners, int is_alt);
 
 extern __thread randomx_vm *rx_vm;
+//static __thread randomx_vm *rx_vm = NULL;
 
 #include <algorithm>
 #include <limits>
@@ -71,8 +69,8 @@ extern __thread randomx_vm *rx_vm;
 #define TMPL_MY_RAWOUTPUTKEYS       TMPL_DIR "/rawoutputkeys.html"
 #define TMPL_MY_CHECKRAWOUTPUTKEYS  TMPL_DIR "/checkrawoutputkeys.html"
 
-#define ARQMAEXPLORER_RPC_VERSION_MAJOR 2
-#define ARQMAEXPLORER_RPC_VERSION_MINOR 6
+#define ARQMAEXPLORER_RPC_VERSION_MAJOR 6
+#define ARQMAEXPLORER_RPC_VERSION_MINOR 2
 #define MAKE_ARQMAEXPLORER_RPC_VERSION(major,minor) (((major)<<16)|(minor))
 #define ARQMAEXPLORER_RPC_VERSION \
     MAKE_ARQMAEXPLORER_RPC_VERSION(ARQMAEXPLORER_RPC_VERSION_MAJOR, ARQMAEXPLORER_RPC_VERSION_MINOR)
@@ -157,7 +155,7 @@ std::string as_hex(T i)
 {
   std::stringstream ss;
 
-  ss << "0x" << setfill ('0') << setw(sizeof(T)*2) 
+  ss << "0x" << setfill ('0') << setw(sizeof(T)*2)
          << hex << i;
   return ss.str();
 }
@@ -167,16 +165,16 @@ struct randomx_status
     randomx::Program prog;
     randomx::RegisterFile reg_file;
 
-    randomx::AssemblyGeneratorX86 
-    get_asm() 
+    randomx::AssemblyGeneratorX86
+    get_asm()
     {
       randomx::AssemblyGeneratorX86 asmX86;
       asmX86.generateProgram(prog);
-    	return asmX86;
+      return asmX86;
     }
 
     mstch::map
-    get_mstch() 
+    get_mstch()
     {
       auto asmx86 = get_asm();
 
@@ -189,19 +187,19 @@ struct randomx_status
           {"rx_code" , ss1.str()},
           {"rx_code_asm", ss2.str()}
       };
-      
+
       for (size_t i = 0; i < randomx::RegistersCount; ++i)
       {
         rx_map["r"+std::to_string(i)] = as_hex(reg_file.r[i]);
       }
-      
+
       for (size_t i = 0; i < randomx::RegistersCount/2; ++i)
       {
         rx_map["f"+std::to_string(i)] = rx_float_as_str(reg_file.f[i]);
         rx_map["e"+std::to_string(i)] = rx_float_as_str(reg_file.e[i]);
         rx_map["a"+std::to_string(i)] = rx_float_as_str(reg_file.a[i]);
       }
-      
+
       return rx_map;
     }
 
@@ -210,24 +208,32 @@ struct randomx_status
     {
       uint64_t* lo = reinterpret_cast<uint64_t*>(&fpu.lo);
       uint64_t* hi = reinterpret_cast<uint64_t*>(&fpu.hi);
-      
+
       return 	 "{" + as_hex(*lo) + ", " + as_hex(*hi)+ "}";
     }
 };
 
-bool me_get_block_longhash(const Blockchain *pbc, const block& b, crypto::hash& res, const uint64_t height, const int miners)
+bool arq_get_block_longhash(const Blockchain *pbc, const block& b, crypto::hash& res, const uint64_t height, const int miners)
 {
   blobdata bd = get_block_hashing_blob(b);
   if(b.major_version >= RX_BLOCK_VERSION)
   {
-    uint64_t seed_height;
+    uint64_t seed_height, main_height;
     crypto::hash hash;
 
     if(pbc != NULL)
+    {
+      seed_height = arq_rx_seedheight(height);
       hash = pbc->get_pending_block_id_by_height(seed_height);
+      main_height = pbc->get_current_blockchain_height();
+    }
     else
+    {
       memset(&hash, 0, sizeof(hash));
-    rx_seedhash(seed_height, hash.data, miners);
+      seed_height = 0;
+      main_height = 0;
+    }
+    arq_rx_slow_hash(main_height, seed_height, hash.data, bd.data(), bd.size(), res.data, miners, 0);
   }
   return true;
 }
@@ -4699,14 +4705,11 @@ json_block(string block_no_or_hash)
         if (!mcore->get_tx(tx_hash, tx))
         {
             j_response["status"]  = "error";
-            j_response["message"]
-                    = fmt::format("Cant get transactions in block: {:d}", block_height);
+            j_response["message"] = fmt::format("Cant get transactions in block: {:d}", block_height);
             return j_response;
         }
 
-        tx_details txd = get_tx_details(tx, false,
-                                        block_height,
-                                        current_blockchain_height);
+        tx_details txd = get_tx_details(tx, false, block_height, current_blockchain_height);
 
         j_txs.push_back(get_tx_json(tx, txd));
 
@@ -4714,9 +4717,12 @@ json_block(string block_no_or_hash)
         sum_fees += txd.fee;
     }
 
+    //blk_reward = xmreg::arq_amount_to_str(txd_coinbase.arq_outputs - sum_fees);
+
     j_data = json {
             {"block_height"  , block_height},
-            {"diff"          , blk_diff},
+           /* {"block_reward"  , blk_reward},
+          */{"diff"          , blk_diff},
             {"hash"          , pod_to_hex(blk_hash)},
             {"timestamp"     , blk.timestamp},
             {"timestamp_utc" , xmreg::timestamp_to_str_gm(blk.timestamp)},
@@ -6419,7 +6425,15 @@ get_tx_details(const transaction &tx,
     tx_details txd;
 
     // get tx hash
-    txd.hash = get_transaction_hash(tx);
+
+    if(!tx.pruned)
+    {
+      txd.hash = get_transaction_hash(tx);
+    }
+    else
+    {
+      txd.hash = get_pruned_transaction_hash(tx, tx.prunable_hash);
+    }
 
     // get tx public key from extra
     // this check if there are two public keys
@@ -6802,58 +6816,56 @@ vector<randomx_status>
 get_randomx_code(uint64_t blk_height, block const& blk, crypto::hash const& blk_hash)
 {
   static std::mutex mtx;
-  
+
   vector<randomx_status> rx_code;
-    
+
   blobdata bd = get_block_hashing_blob(blk);
-  
+
   std::lock_guard<std::mutex> lk {mtx};
 
   if (!rx_vm)
   {
     crypto::hash block_hash;
     // this will create rx_vm instance if one does not exist
-    me_get_block_longhash(core_storage, blk, block_hash, blk_height, 0);
-    
+    arq_get_block_longhash(core_storage, blk, block_hash, blk_height, 0);
+
     if(!rx_vm)
     {
       cerr << "rx_vm is still NULL!";
       return {};
     }
   }
-  
-  
-  // based on randomx calculate hash
+
   // the hash is seed used to generated scrachtpad and program
   alignas(16) uint64_t tempHash[8];
-  blake2b(tempHash, sizeof(tempHash), bd.data(), bd.size(), nullptr, 0); 
+  blake2b(tempHash, sizeof(tempHash), bd.data(), bd.size(), nullptr, 0);
 
   rx_vm->initScratchpad(&tempHash);
   rx_vm->resetRoundingMode();
-  
-  for (int chain = 0; chain < RANDOMX_PROGRAM_COUNT - 1; ++chain) 
+
+  for (int chain = 0; chain < RANDOMX_PROGRAM_COUNT - 1; ++chain)
   {
     rx_vm->run(&tempHash);
-    
-    blake2b(tempHash, sizeof(tempHash), rx_vm->getRegisterFile(), sizeof(randomx::RegisterFile), nullptr, 0); 
+
+    blake2b(tempHash, sizeof(tempHash), rx_vm->getRegisterFile(), sizeof(randomx::RegisterFile), nullptr, 0);
 
     rx_code.push_back({});
-    
+
     rx_code.back().prog = rx_vm->getProgram();
     rx_code.back().reg_file = *(rx_vm->getRegisterFile());
-  }   
+  }
 
   rx_vm->run(&tempHash);
-  
+
   rx_code.push_back({});
-  
+
   rx_code.back().prog = rx_vm->getProgram();
   rx_code.back().reg_file = *(rx_vm->getRegisterFile());
-  
+
   // crypto::hash res2;
   // rx_vm->getFinalResult(res2.data, RANDOMX_HASH_SIZE);
   // cout << "pow2: " << pod_to_hex(res2) << endl;
-  
+
   return rx_code;
 }
 

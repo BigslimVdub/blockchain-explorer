@@ -286,7 +286,7 @@ main(int ac, const char* av[])
     ([&](const crow::request& req, size_t block_height) {
         return crow::response(arqblocks.show_block(block_height));
     });
-    
+
     CROW_ROUTE(app, "/randomx/<uint>")
     ([&](const crow::request& req, size_t block_height) {
         return crow::response(arqblocks.show_randomx(block_height));
